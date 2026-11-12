@@ -188,7 +188,7 @@ export function StudentDocuments() {
                   Uploaded: {doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleDateString() : 'N/A'}
                 </span>
                 <a
-                  href={`/api/v1/documents/${doc.document_id}/download`}
+                  href={doc.file_path && doc.file_path.startsWith('http') ? doc.file_path : `/api/v1/documents/${doc.document_id}/download?token=${localStorage.getItem('spms_token') || ''}`}
                   target="_blank"
                   rel="noreferrer"
                   className="btn-secondary-custom"

@@ -43,6 +43,7 @@ def create_and_send_notification(user_id=None, recipient_role=None, title="", me
 
         return notif
     except Exception as e:
+        db.session.rollback()
         print(f"[WebSocket Error] Could not persist or send notification: {e}")
         return None
 

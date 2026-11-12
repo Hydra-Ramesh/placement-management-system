@@ -13,14 +13,18 @@ def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         auth_header = request.headers.get('Authorization')
-        if not auth_header:
+        token = None
+        if auth_header:
+            parts = auth_header.split()
+            if len(parts) == 2 and parts[0].lower() == 'bearer':
+                token = parts[1]
+
+        # Support token query parameter for direct browser downloads/views
+        if not token:
+            token = request.args.get('token')
+
+        if not token:
             return jsonify({'success': False, 'message': 'Authentication token missing.'}), 401
-
-        parts = auth_header.split()
-        if len(parts) != 2 or parts[0].lower() != 'bearer':
-            return jsonify({'success': False, 'message': 'Invalid token format. Use: Bearer <token>'}), 401
-
-        token = parts[1]
         try:
             payload = jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
             user_id = payload.get('user_id')

@@ -385,7 +385,7 @@ export function DocumentVerificationQueue() {
                 </div>
               </div>
               <a
-                href={`/api/v1/documents/${selectedDoc.document_id}/download`}
+                href={selectedDoc.file_path && selectedDoc.file_path.startsWith('http') ? selectedDoc.file_path : `/api/v1/documents/${selectedDoc.document_id}/download?token=${localStorage.getItem('spms_token') || ''}`}
                 target="_blank"
                 rel="noreferrer"
                 className="btn-secondary-custom"

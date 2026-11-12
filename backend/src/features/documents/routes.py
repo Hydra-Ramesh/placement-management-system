@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from flask import Blueprint, request, jsonify, current_app, send_from_directory, g
+from flask import Blueprint, request, jsonify, current_app, send_from_directory, redirect, g
 from werkzeug.utils import secure_filename
 from src.extensions import db
 from src.models.document import Document
@@ -10,6 +10,7 @@ from src.models.application import Application
 from src.models.audit import AuditLog
 from src.features.auth.decorators import token_required, roles_required
 from src.websocket.emitter import create_and_send_notification, emit_to_role
+from src.services.cloudinary_service import upload_document_file
 
 documents_bp = Blueprint('documents_api', __name__, url_prefix='/api/v1/documents')
 
@@ -64,33 +65,30 @@ def upload_document():
         if not app_obj or app_obj.student_id != student_id:
             return jsonify({'success': False, 'message': 'Invalid application ID.'}), 400
 
-    upload_folder = Path(current_app.config['UPLOAD_FOLDER'])
-    upload_folder.mkdir(parents=True, exist_ok=True)
-
-    timestamp = int(datetime.now(timezone.utc).timestamp())
-    original_filename = secure_filename(file.filename)
-    safe_filename = f"{student.roll_number}_{document_type.replace(' ', '_')}_{timestamp}_{original_filename}"
-    file_path = upload_folder / safe_filename
-
-    file.save(str(file_path))
-    file_size = os.path.getsize(str(file_path))
-
     try:
+        stored_path_or_url, file_size, is_remote = upload_document_file(
+            file=file,
+            original_filename=file.filename,
+            document_type=document_type,
+            student_roll=student.roll_number
+        )
+
         new_doc = Document(
             student_id=student_id,
             application_id=application_id,
             document_type=document_type,
-            file_name=original_filename,
-            file_path=safe_filename,
+            file_name=secure_filename(file.filename),
+            file_path=stored_path_or_url,
             file_size_bytes=file_size,
             mime_type=file.content_type,
             verification_status='Pending'
         )
         db.session.add(new_doc)
+        db.session.flush()
 
         # If student uploaded resume, update student profile resume_url
         if document_type == 'Resume':
-            student.resume_url = f"/api/v1/documents/{new_doc.document_id}/download"
+            student.resume_url = stored_path_or_url if is_remote else f"/api/v1/documents/{new_doc.document_id}/download"
 
         # If linked to application, set application status to Under Document Review
         if application_id:
@@ -271,6 +269,9 @@ def download_document(document_id):
     user = g.current_user
     if not user.is_admin and user.student_id != doc.student_id:
         return jsonify({'success': False, 'message': 'Unauthorized to view this document.'}), 403
+
+    if doc.file_path.startswith(('http://', 'https://')):
+        return redirect(doc.file_path)
 
     upload_folder = current_app.config['UPLOAD_FOLDER']
     return send_from_directory(upload_folder, doc.file_path, as_attachment=False)

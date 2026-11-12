@@ -29,10 +29,16 @@ class Config:
     
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
-    # Upload folder configuration
+    # Upload folder configuration (local fallback)
     UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', str(BACKEND_DIR / 'uploads'))
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16 MB max upload size
     ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'webp', 'doc', 'docx'}
+
+    # Cloudinary Cloud Storage configuration for documents
+    CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME', '')
+    CLOUDINARY_API_KEY = os.getenv('CLOUDINARY_API_KEY', '')
+    CLOUDINARY_API_SECRET = os.getenv('CLOUDINARY_API_SECRET', '')
+    CLOUDINARY_URL = os.getenv('CLOUDINARY_URL', '')
 
     # Connection pooling options
     SQLALCHEMY_ENGINE_OPTIONS = {
