@@ -19,12 +19,15 @@ backend/.env.local
 
 # Databases & local instances
 instance/
+backend/uploads/
 *.sqlite
 *.sqlite3
 *.db
 
 # Node & frontend cache
 node_modules/
+dist/
+frontend/dist/
 .vercel/
 
 # Logs and OS files

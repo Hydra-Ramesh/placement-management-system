@@ -2,16 +2,15 @@ import os
 import sys
 from pathlib import Path
 
-# Setup paths
 BACKEND_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app import create_app
+from src.app import create_app
+from src.extensions import socketio
 
-# WSGI entry point for Gunicorn / Render production server
-app = create_app(os.getenv('FLASK_ENV', 'production'))
+app = create_app('production')
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    port = int(os.environ.get('PORT', 5000))
+    socketio.run(app, host='0.0.0.0', port=port)

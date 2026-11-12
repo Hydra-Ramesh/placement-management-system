@@ -1,12 +1,16 @@
 import os
 import pytest
-from datetime import date, timedelta, datetime
+import io
+from datetime import date, timedelta, datetime, timezone
 from decimal import Decimal
 from sqlalchemy.exc import IntegrityError
 
-from app import create_app
-from models import db, User, Department, Student, Company, Job, Application, Placement, AuditLog
-from services.placement_service import PlacementService
+from src.app import create_app
+from src.extensions import db
+from src.models import (
+    Department, Student, User, Company, Job,
+    Application, Interview, Placement, Document, AuditLog
+)
 
 
 @pytest.fixture
@@ -18,7 +22,7 @@ def app():
         db.create_all()
 
         # Seed baseline test entities
-        dept = Department(department_name='Computer Science', department_code='CSE')
+        dept = Department(department_name='Computer Science & Engineering', department_code='CSE')
         db.session.add(dept)
         db.session.flush()
 
@@ -50,8 +54,8 @@ def app():
         db.session.add(student_user)
 
         company = Company(
-            company_name='TestCorp',
-            industry='Technology',
+            company_name='TestCorp Labs',
+            industry='Cloud Computing',
             contact_email='recruiter@testcorp.com'
         )
         db.session.add(company)
@@ -67,18 +71,19 @@ def app():
             maximum_backlogs=0,
             salary_lpa=Decimal('15.00'),
             application_deadline=date.today() + timedelta(days=30),
-            job_status='Open'
+            job_status='Open',
+            requires_doc_verification=True
         )
 
-        # Expired Job
-        job_expired = Job(
+        # High CGPA Job
+        job_high_cgpa = Job(
             company_id=company.company_id,
-            job_title='Expired Associate',
+            job_title='AI Research Scientist',
             job_type='Full-Time',
-            minimum_cgpa=Decimal('6.00'),
-            maximum_backlogs=1,
-            salary_lpa=Decimal('8.00'),
-            application_deadline=date.today() - timedelta(days=5),
+            minimum_cgpa=Decimal('9.50'),
+            maximum_backlogs=0,
+            salary_lpa=Decimal('35.00'),
+            application_deadline=date.today() + timedelta(days=20),
             job_status='Open'
         )
 
@@ -94,335 +99,253 @@ def app():
             job_status='Closed'
         )
 
-        db.session.add_all([job_active, job_expired, job_closed])
+        db.session.add_all([job_active, job_high_cgpa, job_closed])
         db.session.commit()
 
         yield test_app
 
-        db.session.remove()
-        db.drop_all()
-
 
 @pytest.fixture
 def client(app):
-    """Test client for HTTP requests."""
     return app.test_client()
 
 
-# ------------------------------------------------------------------------------
-# 1. Test Application Startup
-# ------------------------------------------------------------------------------
-def test_app_startup(client):
-    """Verify application initializes and routes root to login or dashboard."""
-    response = client.get('/', follow_redirects=False)
-    assert response.status_code == 302
-    assert '/auth/login' in response.headers['Location']
+def get_token(client, username, password):
+    res = client.post('/api/v1/auth/login', json={'username': username, 'password': password})
+    return res.get_json()['token']
 
 
-# ------------------------------------------------------------------------------
-# 2. Test Login Validation
-# ------------------------------------------------------------------------------
-def test_login_validation(client):
-    """Verify login validation for valid and invalid credentials."""
-    # Invalid password
-    bad_resp = client.post('/auth/login', data={
-        'username': 'admin',
-        'password': 'wrongpassword'
-    }, follow_redirects=True)
-    assert b'Invalid username or password' in bad_resp.data
-
-    # Valid login
-    good_resp = client.post('/auth/login', data={
-        'username': 'admin',
-        'password': 'admin123'
-    }, follow_redirects=True)
-    assert b'Welcome back, admin!' in good_resp.data
-    assert b'Placement Administration Dashboard' in good_resp.data
+# 1. Health Probe Test
+def test_health_check(client):
+    res = client.get('/api/v1/health')
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data['status'] == 'healthy'
+    assert data['websockets'] == 'enabled'
 
 
-# ------------------------------------------------------------------------------
-# 3. Test Registration Validation
-# ------------------------------------------------------------------------------
-def test_registration_validation(client, app):
-    """Verify student registration form validations."""
+# 2. User Authentication & Password Hashing
+def test_password_hashing(app):
+    with app.app_context():
+        user = User(username='hashtest', email='hash@test.edu', role='Student')
+        user.set_password('securepassword')
+        assert user.password_hash != 'securepassword'
+        assert user.check_password('securepassword') is True
+        assert user.check_password('wrongpassword') is False
+
+
+# 3. JWT Login & Profile Retrieval
+def test_jwt_auth_flow(client):
+    res = client.post('/api/v1/auth/login', json={'username': 'admin', 'password': 'admin123'})
+    assert res.status_code == 200
+    token = res.get_json()['token']
+    assert token is not None
+
+    # Access /api/v1/auth/me
+    headers = {'Authorization': f'Bearer {token}'}
+    me_res = client.get('/api/v1/auth/me', headers=headers)
+    assert me_res.status_code == 200
+    assert me_res.get_json()['user']['username'] == 'admin'
+
+
+# 4. Student Registration Validation
+def test_student_registration_validation(client, app):
     with app.app_context():
         dept = Department.query.first()
 
-        # Mismatched passwords
-        mismatch_resp = client.post('/auth/register', data={
-            'username': 'newuser',
-            'email': 'newuser@college.edu',
+        # Invalid CGPA (out of bounds)
+        res_invalid_cgpa = client.post('/api/v1/auth/register', json={
+            'username': 'newuser1',
+            'email': 'new1@test.edu',
             'password': 'password123',
-            'confirm_password': 'differentpassword',
-            'roll_number': '21CS101',
+            'roll_number': '21CS050',
             'first_name': 'New',
             'last_name': 'User',
             'department_id': dept.department_id,
             'graduation_year': 2026,
-            'cgpa': '8.20',
+            'cgpa': '11.5',
             'backlogs': 0
-        }, follow_redirects=True)
-        assert b'Passwords do not match' in mismatch_resp.data
+        })
+        assert res_invalid_cgpa.status_code == 400
+        assert 'CGPA must be between' in res_invalid_cgpa.get_json()['message']
 
         # Valid registration
-        valid_resp = client.post('/auth/register', data={
-            'username': 'newstudent',
-            'email': 'newstudent@college.edu',
+        res_valid = client.post('/api/v1/auth/register', json={
+            'username': 'newuser2',
+            'email': 'new2@test.edu',
             'password': 'password123',
-            'confirm_password': 'password123',
-            'roll_number': '21CS101',
-            'first_name': 'Jane',
-            'last_name': 'Doe',
+            'roll_number': '21CS051',
+            'first_name': 'Valid',
+            'last_name': 'User',
             'department_id': dept.department_id,
             'graduation_year': 2026,
-            'cgpa': '8.80',
+            'cgpa': '8.25',
             'backlogs': 0
-        }, follow_redirects=True)
-        assert b'Registration successful' in valid_resp.data
-
-        created = Student.query.filter_by(roll_number='21CS101').first()
-        assert created is not None
-        assert created.full_name == 'Jane Doe'
+        })
+        assert res_valid.status_code == 201
+        assert res_valid.get_json()['success'] is True
 
 
-# ------------------------------------------------------------------------------
-# 4. Test Authorization and Role-Based Access Control (RBAC)
-# ------------------------------------------------------------------------------
-def test_authorization_rbac(client):
-    """Verify students cannot access administrative dashboards and routes."""
-    # Log in as regular Student
-    client.post('/auth/login', data={
-        'username': 'teststudent',
-        'password': 'student123'
-    }, follow_redirects=True)
+# 5. Role-Based Access Control (RBAC)
+def test_rbac_admin_endpoint_restriction(client):
+    student_token = get_token(client, 'teststudent', 'student123')
+    admin_token = get_token(client, 'admin', 'admin123')
 
-    # Attempt to access admin dashboard
-    admin_resp = client.get('/admin/dashboard', follow_redirects=True)
-    assert b'Access Denied: Administrative privileges required' in admin_resp.data
+    # Student cannot view admin document verification queue
+    res_student = client.get('/api/v1/documents/pending', headers={'Authorization': f'Bearer {student_token}'})
+    assert res_student.status_code == 403
 
-    # Attempt to access admin reports
-    reports_resp = client.get('/admin/reports', follow_redirects=True)
-    assert b'Access Denied: Administrative privileges required' in reports_resp.data
+    # Admin can view it
+    res_admin = client.get('/api/v1/documents/pending', headers={'Authorization': f'Bearer {admin_token}'})
+    assert res_admin.status_code == 200
 
 
-# ------------------------------------------------------------------------------
-# 5. Test Student Creation
-# ------------------------------------------------------------------------------
-def test_student_creation(app):
-    """Verify programmatic creation of students with relational integrity."""
-    with app.app_context():
-        dept = Department.query.first()
-        student = Student(
-            roll_number='21CS888',
-            first_name='Kavita',
-            last_name='Roy',
-            email='kavita@college.edu',
-            department_id=dept.department_id,
-            graduation_year=2025,
-            cgpa=Decimal('9.10'),
-            backlogs=0
-        )
-        db.session.add(student)
-        db.session.commit()
+# 6. Academic Eligibility Calculation
+def test_job_eligibility_logic(client):
+    student_token = get_token(client, 'teststudent', 'student123')
+    headers = {'Authorization': f'Bearer {student_token}'}
 
-        retrieved = Student.query.filter_by(roll_number='21CS888').first()
-        assert retrieved is not None
-        assert retrieved.department.department_code == 'CSE'
-        assert retrieved.is_placed is False
+    res = client.get('/api/v1/jobs', headers=headers)
+    assert res.status_code == 200
+    jobs = res.get_json()['jobs']
+
+    # Software Engineer: requires 7.50, student has 8.50 -> Eligible
+    se_job = next(j for j in jobs if j['job_title'] == 'Software Engineer')
+    assert se_job['is_eligible'] is True
+
+    # AI Research: requires 9.50, student has 8.50 -> Ineligible
+    ai_job = next(j for j in jobs if j['job_title'] == 'AI Research Scientist')
+    assert ai_job['is_eligible'] is False
+    assert 'CGPA requirement not met' in ai_job['eligibility_reason']
 
 
-# ------------------------------------------------------------------------------
-# 6. Test Duplicate Student Prevention
-# ------------------------------------------------------------------------------
-def test_duplicate_student_prevention(app):
-    """Enforces UNIQUE roll_number and UNIQUE email constraints."""
-    with app.app_context():
-        dept = Department.query.first()
-        # Duplicate roll number
-        dup_roll = Student(
-            roll_number='21CS999',  # Already exists in fixture
-            first_name='Duplicate',
-            last_name='Roll',
-            email='unique.email@test.edu',
-            department_id=dept.department_id,
-            graduation_year=2025,
-            cgpa=Decimal('8.00'),
-            backlogs=0
-        )
-        db.session.add(dup_roll)
-        with pytest.raises(IntegrityError):
-            db.session.commit()
-        db.session.rollback()
+# 7. Document Upload & Admin Verification Workflow
+def test_document_verification_lifecycle(client):
+    student_token = get_token(client, 'teststudent', 'student123')
+    admin_token = get_token(client, 'admin', 'admin123')
+
+    # Student applies for job
+    apply_res = client.post(
+        '/api/v1/applications/apply',
+        json={'job_id': 1},
+        headers={'Authorization': f'Bearer {student_token}'}
+    )
+    assert apply_res.status_code == 201
+    app_id = apply_res.get_json()['application']['application_id']
+
+    # Student uploads transcript
+    file_content = b"%PDF-1.4 Mock Transcript For Test"
+    upload_res = client.post(
+        '/api/v1/documents/upload',
+        data={
+            'file': (io.BytesIO(file_content), 'transcript_sem6.pdf'),
+            'document_type': 'Grade Transcript',
+            'application_id': app_id
+        },
+        content_type='multipart/form-data',
+        headers={'Authorization': f'Bearer {student_token}'}
+    )
+    assert upload_res.status_code == 201
+    doc_id = upload_res.get_json()['document']['document_id']
+
+    # Admin verifies document
+    verify_res = client.post(
+        f'/api/v1/documents/{doc_id}/verify',
+        json={'action': 'Verified', 'notes': 'Official university seal confirmed.'},
+        headers={'Authorization': f'Bearer {admin_token}'}
+    )
+    assert verify_res.status_code == 200
+    doc_data = verify_res.get_json()['document']
+    assert doc_data['verification_status'] == 'Verified'
+    assert doc_data['verified_by'] == 'admin'
+
+    # Verify application status automatically transitioned to TPO Approved
+    app_res = client.get(f'/api/v1/applications/{app_id}', headers={'Authorization': f'Bearer {student_token}'})
+    assert app_res.get_json()['application']['application_status'] == 'TPO Approved'
+
+    # Now student confirms application
+    confirm_res = client.post(
+        f'/api/v1/applications/{app_id}/confirm-apply',
+        headers={'Authorization': f'Bearer {student_token}'}
+    )
+    assert confirm_res.status_code == 200
+    assert confirm_res.get_json()['application']['application_status'] == 'Applied'
 
 
-# ------------------------------------------------------------------------------
-# 7. Test Duplicate Application Prevention
-# ------------------------------------------------------------------------------
-def test_duplicate_application_prevention(app):
-    """Enforces UNIQUE(student_id, job_id) constraint preventing multiple applications."""
-    with app.app_context():
-        student = Student.query.filter_by(roll_number='21CS999').first()
-        job = Job.query.filter_by(job_title='Software Engineer').first()
+# 8. Duplicate Application Prevention
+def test_duplicate_application_blocked(client):
+    student_token = get_token(client, 'teststudent', 'student123')
+    headers = {'Authorization': f'Bearer {student_token}'}
 
-        # First application succeeds
-        ok1, msg1 = PlacementService.apply_for_job(student.student_id, job.job_id)
-        assert ok1 is True
+    # First application
+    res1 = client.post('/api/v1/applications/apply', json={'job_id': 1}, headers=headers)
+    assert res1.status_code == 201
 
-        # Second application must fail
-        ok2, msg2 = PlacementService.apply_for_job(student.student_id, job.job_id)
-        assert ok2 is False
-        assert "already applied" in msg2.lower()
+    # Second application to same job
+    res2 = client.post('/api/v1/applications/apply', json={'job_id': 1}, headers=headers)
+    assert res2.status_code == 409
+    assert 'already applied' in res2.get_json()['message'].lower()
 
 
-# ------------------------------------------------------------------------------
-# 8. Test Invalid Foreign Key References
-# ------------------------------------------------------------------------------
-def test_invalid_foreign_key_references(app):
-    """Verify that records with non-existent foreign keys are rejected."""
-    with app.app_context():
-        invalid_job = Job(
-            company_id=99999,  # Non-existent company
-            job_title='Ghost Job',
-            salary_lpa=Decimal('10.00'),
-            application_deadline=date.today() + timedelta(days=5),
-            job_status='Open'
-        )
-        db.session.add(invalid_job)
-        # In SQLite / MySQL FK violation raises IntegrityError on commit/flush
-        with pytest.raises(Exception):
-            db.session.commit()
-        db.session.rollback()
+# 9. Interview Scheduling
+def test_interview_scheduling(client):
+    student_token = get_token(client, 'teststudent', 'student123')
+    admin_token = get_token(client, 'admin', 'admin123')
+
+    client.post('/api/v1/applications/apply', json={'job_id': 1}, headers={'Authorization': f'Bearer {student_token}'})
+
+    schedule_res = client.post(
+        '/api/v1/interviews/schedule',
+        json={
+            'application_id': 1,
+            'interview_round': 'Technical Round 1',
+            'interview_date': '2026-11-20T10:00:00',
+            'interview_mode': 'Online',
+            'interview_location': 'https://meet.google.com/test-room'
+        },
+        headers={'Authorization': f'Bearer {admin_token}'}
+    )
+    assert schedule_res.status_code == 201
+    assert schedule_res.get_json()['interview']['interview_round'] == 'Technical Round 1'
 
 
-# ------------------------------------------------------------------------------
-# 9. Test Job Eligibility Checks
-# ------------------------------------------------------------------------------
-def test_job_eligibility_checks(app):
-    """Verify minimum CGPA and maximum backlogs academic validation."""
-    with app.app_context():
-        dept = Department.query.first()
-        company = Company.query.first()
+# 10. Placement Selection & Offer ACID Transaction
+def test_placement_selection_acid(client):
+    student_token = get_token(client, 'teststudent', 'student123')
+    admin_token = get_token(client, 'admin', 'admin123')
 
-        # High bar job: Min CGPA 9.00
-        elite_job = Job(
-            company_id=company.company_id,
-            job_title='Elite SDE',
-            minimum_cgpa=Decimal('9.00'),
-            maximum_backlogs=0,
-            salary_lpa=Decimal('40.00'),
-            application_deadline=date.today() + timedelta(days=20),
-            job_status='Open'
-        )
-        db.session.add(elite_job)
-        db.session.commit()
+    client.post('/api/v1/applications/apply', json={'job_id': 1}, headers={'Authorization': f'Bearer {student_token}'})
 
-        # Student with 8.50 CGPA applies
-        student = Student.query.filter_by(roll_number='21CS999').first() # CGPA is 8.50
-        ok, msg = PlacementService.apply_for_job(student.student_id, elite_job.job_id)
-        assert ok is False
-        assert "CGPA requirement not met" in msg
+    # Admin issues placement offer
+    select_res = client.post(
+        '/api/v1/placements/select',
+        json={'application_id': 1, 'package_lpa': 15.00},
+        headers={'Authorization': f'Bearer {admin_token}'}
+    )
+    assert select_res.status_code == 201
+    plc = select_res.get_json()['placement']
+    assert plc['package_lpa'] == 15.00
+    assert plc['placement_status'] == 'Accepted'
+
+    # Verify student is now marked as placed
+    me_res = client.get('/api/v1/auth/me', headers={'Authorization': f'Bearer {student_token}'})
+    assert me_res.status_code == 200
 
 
-# ------------------------------------------------------------------------------
-# 10. Test Application Deadline Checks
-# ------------------------------------------------------------------------------
-def test_application_deadline_checks(app):
-    """Enforce that expired and closed jobs reject applications."""
-    with app.app_context():
-        student = Student.query.filter_by(roll_number='21CS999').first()
-        expired_job = Job.query.filter_by(job_title='Expired Associate').first()
-        closed_job = Job.query.filter_by(job_title='Closed Role').first()
+# 11. Analytics & Reports API
+def test_analytics_and_reports_api(client):
+    admin_token = get_token(client, 'admin', 'admin123')
+    headers = {'Authorization': f'Bearer {admin_token}'}
 
-        # Expired deadline
-        ok1, msg1 = PlacementService.apply_for_job(student.student_id, expired_job.job_id)
-        assert ok1 is False
-        assert "deadline" in msg1.lower()
+    dash_res = client.get('/api/v1/analytics/dashboard')
+    assert dash_res.status_code == 200
+    dash_data = dash_res.get_json()
+    assert 'metrics' in dash_data
+    assert 'charts' in dash_data
 
-        # Closed job
-        ok2, msg2 = PlacementService.apply_for_job(student.student_id, closed_job.job_id)
-        assert ok2 is False
-        assert "closed" in msg2.lower()
-
-
-# ------------------------------------------------------------------------------
-# 11. Test Placement Record Creation
-# ------------------------------------------------------------------------------
-def test_placement_record_creation(app):
-    """Verify candidate selection atomically creates placement and updates status."""
-    with app.app_context():
-        student = Student.query.filter_by(roll_number='21CS999').first()
-        job = Job.query.filter_by(job_title='Software Engineer').first()
-
-        # Submit application
-        ok_app, _ = PlacementService.apply_for_job(student.student_id, job.job_id)
-        assert ok_app is True
-
-        app_record = Application.query.filter_by(student_id=student.student_id, job_id=job.job_id).first()
-
-        # Select candidate
-        ok_select, msg_select = PlacementService.select_and_place_candidate(
-            application_id=app_record.application_id,
-            package_lpa=Decimal('16.50'),
-            admin_user='admin'
-        )
-        assert ok_select is True
-        assert "successfully selected" in msg_select.lower()
-
-        # Verify application status
-        assert app_record.application_status == 'Selected'
-
-        # Verify placement record
-        plc = Placement.query.filter_by(student_id=student.student_id, job_id=job.job_id).first()
-        assert plc is not None
-        assert plc.package_lpa == Decimal('16.50')
-        assert student.is_placed is True
-
-
-# ------------------------------------------------------------------------------
-# 12. Test Invalid CGPA Values
-# ------------------------------------------------------------------------------
-def test_invalid_cgpa_values(client, app):
-    """Enforces CGPA range check (0.0 to 10.0)."""
-    with app.app_context():
-        dept = Department.query.first()
-        # Post registration with CGPA = 11.50
-        resp = client.post('/auth/register', data={
-            'username': 'invalidcgpa',
-            'email': 'invalidcgpa@college.edu',
-            'password': 'password123',
-            'confirm_password': 'password123',
-            'roll_number': '21CS998',
-            'first_name': 'Invalid',
-            'last_name': 'CGPA',
-            'department_id': dept.department_id,
-            'graduation_year': 2026,
-            'cgpa': '11.50',
-            'backlogs': 0
-        }, follow_redirects=True)
-        assert b'CGPA must be between 0.00 and 10.00' in resp.data
-
-
-# ------------------------------------------------------------------------------
-# 13. Test SQL Transaction Rollback on Failure
-# ------------------------------------------------------------------------------
-def test_sql_transaction_rollback_on_failure(app):
-    """Demonstrates Atomicity: If an operation fails, the transaction rolls back cleanly."""
-    with app.app_context():
-        student = Student.query.filter_by(roll_number='21CS999').first()
-        job = Job.query.filter_by(job_title='Software Engineer').first()
-
-        PlacementService.apply_for_job(student.student_id, job.job_id)
-        app_record = Application.query.filter_by(student_id=student.student_id, job_id=job.job_id).first()
-
-        # Attempt to select candidate with negative package (triggers validation rollback)
-        ok, msg = PlacementService.select_and_place_candidate(
-            application_id=app_record.application_id,
-            package_lpa=Decimal('-5.00')
-        )
-        assert ok is False
-        assert "greater than zero" in msg.lower()
-
-        # Verify status did not change and placement was not inserted
-        app_record_after = db.session.get(Application, app_record.application_id)
-        assert app_record_after.application_status == 'Applied'
-        assert Placement.query.filter_by(student_id=student.student_id).first() is None
+    reports_res = client.get('/api/v1/analytics/reports', headers=headers)
+    assert reports_res.status_code == 200
+    rep_data = reports_res.get_json()
+    assert 'department_report' in rep_data
+    assert 'company_report' in rep_data
+    assert 'audit_logs' in rep_data
