@@ -25,11 +25,21 @@ export function SocketProvider({ children }) {
   }, []);
 
   useEffect(() => {
-    const socketInstance = io(window.location.origin, {
+    // In local development, use window.location.origin (proxied by Vite to Flask backend)
+    // In production on Vercel, connect directly to the live Render backend service to avoid Vercel CDN 400 WebSocket handshake limitations
+    const socketUrl =
+      import.meta.env.VITE_SOCKET_URL ||
+      (typeof window !== 'undefined' &&
+      (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+        ? window.location.origin
+        : 'https://spms-backend-jt6l.onrender.com');
+
+    const socketInstance = io(socketUrl, {
       path: '/socket.io',
-      transports: ['websocket', 'polling'],
+      transports: ['polling', 'websocket'],
       reconnectionAttempts: 10,
       reconnectionDelay: 2000,
+      timeout: 10000,
     });
 
     socketInstance.on('connect', () => {
