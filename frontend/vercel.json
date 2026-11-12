@@ -1,15 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "cleanUrls": true,
   "rewrites": [
     {
       "source": "/api/(.*)",
       "destination": "https://spms-backend-jt6l.onrender.com/api/$1"
-    },
-    {
-      "source": "/socket.io/(.*)",
-      "destination": "https://spms-backend-jt6l.onrender.com/socket.io/$1"
     },
     {
       "source": "/(.*)",
