@@ -74,13 +74,26 @@ def upload_document_file(file, original_filename, document_type='Resume', studen
             if hasattr(file, 'seek'):
                 file.seek(0)
 
-            upload_result = cloudinary.uploader.upload(
-                file,
-                resource_type='auto',
-                folder='spms_documents',
-                public_id=public_id,
-                overwrite=True
-            )
+            try:
+                upload_result = cloudinary.uploader.upload(
+                    file,
+                    resource_type='auto',
+                    folder='spms_documents',
+                    public_id=public_id,
+                    overwrite=True
+                )
+            except Exception as auto_err:
+                # If auto-detection or image parsing fails, fall back to raw resource type
+                if hasattr(file, 'seek'):
+                    file.seek(0)
+                upload_result = cloudinary.uploader.upload(
+                    file,
+                    resource_type='raw',
+                    folder='spms_documents',
+                    public_id=public_id,
+                    overwrite=True
+                )
+
             remote_url = upload_result.get('secure_url')
             size_bytes = upload_result.get('bytes', 0)
             return remote_url, size_bytes, True
@@ -100,3 +113,4 @@ def upload_document_file(file, original_filename, document_type='Resume', studen
     size_bytes = os.path.getsize(str(dest_path))
 
     return safe_filename, size_bytes, False
+
